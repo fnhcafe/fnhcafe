@@ -24,12 +24,52 @@
 </div>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, runTransaction, serverTimestamp, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig, PLACE_NAME } from "./firebase-config.js";
 document.getElementById("ttl").textContent = PLACE_NAME;
 const db = getFirestore(initializeApp(firebaseConfig));
 const norm = p => { p = (p||"").replace(/[^\d]/g,"").replace(/^00/,""); if (/^05\d{8}$/.test(p)) p = "966"+p.slice(1); return p; };
 const $ = id => document.getElementById(id);
+const KEY = "fnh_ticket";
+const GRACE = 5 * 60 * 1000;
+let stopA = null, stopB = null, timer = null;
+
+function mmss(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+
+function track(n) {
+  try { localStorage.setItem(KEY, String(n)); } catch (e) {}
+  if (stopA) stopA(); if (stopB) stopB(); if (timer) clearInterval(timer);
+  let mine = null, waiting = [];
+  $("box").innerHTML = '<div class="ok"><div class="m">رقمك</div><div class="tnum">' + n + '</div><h2 id="st">جاري التحميل...</h2><p class="s" id="ps"></p><div id="act"></div></div>';
+  const draw = () => {
+    if (!mine) return;
+    const st = $("st"), ps = $("ps"), act = $("act"); if (!st) return;
+    act.innerHTML = "";
+    if (mine.status === "waiting") {
+      const ahead = waiting.filter(t => t < n).length;
+      st.textContent = "ترتيبك في الانتظار: " + (ahead + 1);
+      ps.textContent = ahead === 0 ? "أنت التالي، ابقَ قريباً من المكان" : "قبلك " + ahead + (ahead === 1 ? " حجز" : " حجوزات");
+    } else if (mine.status === "called") {
+      st.textContent = "طاولتك جاهزة الآن 🎉";
+      const left = (mine.calledAt || 0) + GRACE - Date.now();
+      ps.textContent = left > 0 ? "تفضّل خلال " + mmss(left) + " وإلا سيُلغى الحجز" : "انتهت المهلة";
+    } else if (mine.status === "done") {
+      st.textContent = "شكراً لزيارتك ☕"; ps.textContent = "نتمنى لك وقتاً طيباً في فنة";
+      act.innerHTML = '<button class="b o" id="again">حجز جديد</button>';
+    } else {
+      st.textContent = "أُلغي حجزك"; ps.textContent = "تم الإلغاء لعدم الحضور في الوقت المحدد";
+      act.innerHTML = '<button class="b o" id="again">حجز جديد</button>';
+    }
+    const ag = $("again"); if (ag) ag.onclick = () => { try { localStorage.removeItem(KEY); } catch (e) {} location.reload(); };
+  };
+  stopA = onSnapshot(doc(db, "tickets", String(n)), s => {
+    if (!s.exists()) { try { localStorage.removeItem(KEY); } catch (e) {} location.reload(); return; }
+    mine = s.data(); draw();
+  }, () => { const st = $("st"); if (st) st.textContent = "تعذّر تحديث الحالة، حدّث الصفحة"; });
+  stopB = onSnapshot(query(collection(db, "tickets"), where("status", "==", "waiting")), s => { waiting = s.docs.map(d => d.data().ticket); draw(); }, () => {});
+  timer = setInterval(draw, 1000);
+}
+
 $("go").onclick = async () => {
   const name = $("nm").value.trim(), phone = norm($("ph").value), count = parseInt($("ct").value,10);
   if (!name) return $("er").textContent = "اكتب الاسم";
@@ -37,13 +77,24 @@ $("go").onclick = async () => {
   if (!count || count < 1 || count > 30) return $("er").textContent = "اكتب عدد الأشخاص (من 1 إلى 30)";
   $("er").textContent = ""; $("go").disabled = true;
   try {
-    await addDoc(collection(db,"waitlist"), { name: name.slice(0,60), phone, count, createdAt: serverTimestamp() });
-    $("box").innerHTML = '<div class="ok"><div class="big">✅</div><h2>تم تسجيلك</h2><p class="s">سنتواصل معك على جوالك عندما تكون طاولتك جاهزة.</p></div>';
+    const n = await runTransaction(db, async tx => {
+      const cref = doc(db, "meta", "counter");
+      const snap = await tx.get(cref);
+      const next = (snap.exists() ? snap.data().n : 0) + 1;
+      tx.set(cref, { n: next });
+      tx.set(doc(collection(db, "waitlist")), { name: name.slice(0,60), phone, count, createdAt: serverTimestamp(), ticket: next });
+      tx.set(doc(db, "tickets", String(next)), { ticket: next, status: "waiting", createdAt: serverTimestamp() });
+      return next;
+    });
+    track(n);
   } catch (e) {
-    $("er").textContent = "تعذّر التسجيل. تأكد من الاتصال وحاول مرة ثانية.";
+    console.error(e);
+    $("er").textContent = "تعذّر التسجيل (" + (e && e.code ? e.code : "خطأ") + "). تأكد من الاتصال وحاول مرة ثانية.";
     $("go").disabled = false;
   }
 };
+
+try { const saved = localStorage.getItem(KEY); if (saved) track(parseInt(saved, 10)); } catch (e) {}
 </script>
 </body>
 </html>

@@ -27,3 +27,4 @@ input:focus{outline:2px solid var(--tx);outline-offset:1px}
 .ok{text-align:center;padding:10px 0}.ok .big{font-size:46px}
 #qr{display:flex;justify-content:center;background:#fff;padding:12px;border-radius:4px;margin:10px 0}
 details summary{cursor:pointer;font-weight:700}
+.tnum{font-size:72px;font-weight:800;line-height:1;margin:2px 0 8px}

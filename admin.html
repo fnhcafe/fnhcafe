@@ -16,7 +16,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, query, orderBy, onSnapshot, updateDoc, serverTimestamp, doc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, query, orderBy, onSnapshot, writeBatch, serverTimestamp, doc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 const app = initializeApp(firebaseConfig), auth = getAuth(app), db = getFirestore(app);
 const root = document.getElementById("app");
@@ -40,16 +40,20 @@ const isDone = e => e.status === "done" || e.status === "cancelled";
 const label = e => e.status === "cancelled" ? "ملغي (تأخر)" : "تمت خدمته";
 const cancelling = new Set();
 let warned = false;
-function save(id, data) {
-  return updateDoc(doc(db, "waitlist", id), data).catch(err => {
+function save(id, data, tdata) {
+  const e = items.find(x => x.id === id);
+  const b = writeBatch(db);
+  b.update(doc(db, "waitlist", id), data);
+  if (e && e.ticket && tdata) b.update(doc(db, "tickets", String(e.ticket)), tdata);
+  return b.commit().catch(err => {
     console.error(err);
-    if (!warned) { warned = true; alert("تعذّر حفظ التغيير. تأكد أن قواعد Firebase تسمح بالتعديل (allow update: if request.auth != null) ثم اضغط Publish.\n\n" + (err && err.code ? err.code : "")); setTimeout(() => warned = false, 15000); }
+    if (!warned) { warned = true; alert("تعذّر حفظ التغيير. تأكد من نشر قواعد Firebase الأخيرة ثم حاول مرة ثانية.\n\n" + (err && err.code ? err.code : "")); setTimeout(() => warned = false, 15000); }
     throw err;
   });
 }
 function cancelBooking(id) {
   if (cancelling.has(id)) return; cancelling.add(id);
-  return save(id, { status: "cancelled", doneAt: serverTimestamp() }).catch(() => setTimeout(() => cancelling.delete(id), 20000));
+  return save(id, { status: "cancelled", doneAt: serverTimestamp() }, { status: "cancelled" }).catch(() => setTimeout(() => cancelling.delete(id), 20000));
 }
 function mmss(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
 function tick() {
@@ -82,7 +86,7 @@ function render() {
     const btns = e.calledAt
       ? '<a class="b" href="' + wa + '" target="_blank" rel="noopener">إعادة الإرسال</a><a class="b o" href="tel:+' + e.phone + '">اتصال</a><button class="b o" data-d="' + e.id + '">حضر</button><button class="b o" data-x="' + e.id + '">إلغاء الحجز</button>'
       : '<a class="b" href="' + wa + '" target="_blank" rel="noopener" data-c="' + e.id + '">استدعاء (5 د)</a><a class="b o" href="tel:+' + e.phone + '">اتصال</a><button class="b o" data-d="' + e.id + '">تم</button><button class="b o" data-x="' + e.id + '">إلغاء</button>';
-    h.push('<div class="c"><div class="row"><span class="n">' + (i + 1) + '</span><div><b>' + esc(e.name) + '</b><div class="m">' + e.count + ' أشخاص، ينتظر منذ ' + mins + ' دقيقة</div></div></div>' +
+    h.push('<div class="c"><div class="row"><span class="n">' + (i + 1) + '</span><div><b>' + esc(e.name) + '</b><div class="m">' + (e.ticket ? 'رقم ' + e.ticket + '، ' : '') + e.count + ' أشخاص، ينتظر منذ ' + mins + ' دقيقة</div></div></div>' +
       '<div class="m" dir="ltr" style="text-align:right;margin-top:6px">+' + esc(e.phone) + '</div>' +
       (e.calledAt ? '<div class="err" data-cd="' + e.id + '" style="font-weight:700"></div>' : '') +
       '<div class="a" style="flex-wrap:wrap">' + btns + '</div></div>');
@@ -99,9 +103,9 @@ function render() {
   root.innerHTML = h.join("");
   document.getElementById("out").onclick = () => signOut(auth);
   document.getElementById("csv").onclick = exportCsv;
-  root.querySelectorAll("[data-d]").forEach(b => b.onclick = () => save(b.dataset.d, { status: "done", doneAt: serverTimestamp() }).catch(() => {}));
+  root.querySelectorAll("[data-d]").forEach(b => b.onclick = () => save(b.dataset.d, { status: "done", doneAt: serverTimestamp() }, { status: "done" }).catch(() => {}));
   root.querySelectorAll("[data-x]").forEach(b => b.onclick = () => { if (confirm("إلغاء هذا الحجز؟")) cancelBooking(b.dataset.x); });
-  root.querySelectorAll("[data-c]").forEach(a => a.onclick = () => { save(a.dataset.c, { calledAt: Date.now() }).catch(() => {}); });
+  root.querySelectorAll("[data-c]").forEach(a => a.onclick = () => { (() => { const t = Date.now(); return save(a.dataset.c, { calledAt: t }, { status: "called", calledAt: t }); })().catch(() => {}); });
   try {
     const link = location.origin + location.pathname.replace(/[^\\/]*$/, "");
     const q = qrcode(0, "M"); q.addData(link); q.make();
