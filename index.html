@@ -30,14 +30,17 @@ document.getElementById("ttl").textContent = PLACE_NAME;
 const db = getFirestore(initializeApp(firebaseConfig));
 const norm = p => { p = (p||"").replace(/[^\d]/g,"").replace(/^00/,""); if (/^05\d{8}$/.test(p)) p = "966"+p.slice(1); return p; };
 const $ = id => document.getElementById(id);
-const KEY = "fnh_ticket";
+const KEY = "fnh_ticket_v2";
 const GRACE = 5 * 60 * 1000;
+// يوم العمل يبدأ الساعة 2 فجراً بتوقيت السعودية (UTC+3) وينتهي 2 فجراً اليوم التالي
+const dayOf = ms => new Date(ms + 3 * 3600e3 - 2 * 3600e3).toISOString().slice(0, 10).replace(/-/g, "");
 let stopA = null, stopB = null, timer = null;
 
 function mmss(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+function clearSaved() { try { localStorage.removeItem(KEY); } catch (e) {} }
 
-function track(n) {
-  try { localStorage.setItem(KEY, String(n)); } catch (e) {}
+function track(day, n) {
+  try { localStorage.setItem(KEY, JSON.stringify({ day, n })); } catch (e) {}
   if (stopA) stopA(); if (stopB) stopB(); if (timer) clearInterval(timer);
   let mine = null, waiting = [];
   $("box").innerHTML = '<div class="ok"><div class="m">رقمك</div><div class="tnum">' + n + '</div><h2 id="st">جاري التحميل...</h2><p class="s" id="ps"></p><div id="act"></div></div>';
@@ -60,13 +63,13 @@ function track(n) {
       st.textContent = "أُلغي حجزك"; ps.textContent = "تم الإلغاء لعدم الحضور في الوقت المحدد";
       act.innerHTML = '<button class="b o" id="again">حجز جديد</button>';
     }
-    const ag = $("again"); if (ag) ag.onclick = () => { try { localStorage.removeItem(KEY); } catch (e) {} location.reload(); };
+    const ag = $("again"); if (ag) ag.onclick = () => { clearSaved(); location.reload(); };
   };
-  stopA = onSnapshot(doc(db, "tickets", String(n)), s => {
-    if (!s.exists()) { try { localStorage.removeItem(KEY); } catch (e) {} location.reload(); return; }
+  stopA = onSnapshot(doc(db, "tickets", day + "_" + n), s => {
+    if (!s.exists()) { clearSaved(); location.reload(); return; }
     mine = s.data(); draw();
   }, () => { const st = $("st"); if (st) st.textContent = "تعذّر تحديث الحالة، حدّث الصفحة"; });
-  stopB = onSnapshot(query(collection(db, "tickets"), where("status", "==", "waiting")), s => { waiting = s.docs.map(d => d.data().ticket); draw(); }, () => {});
+  stopB = onSnapshot(query(collection(db, "tickets"), where("day", "==", day), where("status", "==", "waiting")), s => { waiting = s.docs.map(d => d.data().ticket); draw(); }, () => {});
   timer = setInterval(draw, 1000);
 }
 
@@ -76,17 +79,18 @@ $("go").onclick = async () => {
   if (phone.length < 9 || phone.length > 15) return $("er").textContent = "رقم الجوال غير صحيح";
   if (!count || count < 1 || count > 30) return $("er").textContent = "اكتب عدد الأشخاص (من 1 إلى 30)";
   $("er").textContent = ""; $("go").disabled = true;
+  const day = dayOf(Date.now());
   try {
     const n = await runTransaction(db, async tx => {
-      const cref = doc(db, "meta", "counter");
+      const cref = doc(db, "counters", day);
       const snap = await tx.get(cref);
       const next = (snap.exists() ? snap.data().n : 0) + 1;
       tx.set(cref, { n: next });
-      tx.set(doc(collection(db, "waitlist")), { name: name.slice(0,60), phone, count, createdAt: serverTimestamp(), ticket: next });
-      tx.set(doc(db, "tickets", String(next)), { ticket: next, status: "waiting", createdAt: serverTimestamp() });
+      tx.set(doc(collection(db, "waitlist")), { name: name.slice(0,60), phone, count, createdAt: serverTimestamp(), ticket: next, day });
+      tx.set(doc(db, "tickets", day + "_" + next), { ticket: next, day, status: "waiting", createdAt: serverTimestamp() });
       return next;
     });
-    track(n);
+    track(day, n);
   } catch (e) {
     console.error(e);
     $("er").textContent = "تعذّر التسجيل (" + (e && e.code ? e.code : "خطأ") + "). تأكد من الاتصال وحاول مرة ثانية.";
@@ -94,7 +98,10 @@ $("go").onclick = async () => {
   }
 };
 
-try { const saved = localStorage.getItem(KEY); if (saved) track(parseInt(saved, 10)); } catch (e) {}
+try {
+  const saved = JSON.parse(localStorage.getItem(KEY) || "null");
+  if (saved && saved.day === dayOf(Date.now())) track(saved.day, saved.n); else if (saved) clearSaved();
+} catch (e) {}
 </script>
 </body>
 </html>

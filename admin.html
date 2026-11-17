@@ -36,15 +36,19 @@ function loginView() {
 
 function fmt(t) { try { return t.toDate().toLocaleString("ar", { dateStyle: "short", timeStyle: "short" }); } catch (e) { return ""; } }
 const GRACE = 5 * 60 * 1000;
+// يوم العمل ينتهي 2 فجراً بتوقيت السعودية
+const dayOf = ms => new Date(ms + 3 * 3600e3 - 2 * 3600e3).toISOString().slice(0, 10).replace(/-/g, "");
+const eDay = e => e.createdAt ? dayOf(e.createdAt.toMillis()) : dayOf(Date.now());
 const isDone = e => e.status === "done" || e.status === "cancelled";
-const label = e => e.status === "cancelled" ? "ملغي (تأخر)" : "تمت خدمته";
+const isStale = e => !isDone(e) && eDay(e) !== dayOf(Date.now());
+const label = e => e.status === "cancelled" ? "ملغي (تأخر)" : e.status === "done" ? "تمت خدمته" : "لم تتم خدمته (يوم سابق)";
 const cancelling = new Set();
 let warned = false;
 function save(id, data, tdata) {
   const e = items.find(x => x.id === id);
   const b = writeBatch(db);
   b.update(doc(db, "waitlist", id), data);
-  if (e && e.ticket && tdata) b.update(doc(db, "tickets", String(e.ticket)), tdata);
+  if (e && e.ticket && e.day && tdata) b.update(doc(db, "tickets", e.day + "_" + e.ticket), tdata);
   return b.commit().catch(err => {
     console.error(err);
     if (!warned) { warned = true; alert("تعذّر حفظ التغيير. تأكد من نشر قواعد Firebase الأخيرة ثم حاول مرة ثانية.\n\n" + (err && err.code ? err.code : "")); setTimeout(() => warned = false, 15000); }
@@ -58,7 +62,7 @@ function cancelBooking(id) {
 function mmss(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
 function tick() {
   items.forEach(e => {
-    if (isDone(e) || !e.calledAt) return;
+    if (isDone(e) || isStale(e) || !e.calledAt) return;
     const left = e.calledAt + GRACE - Date.now();
     const el = root.querySelector('[data-cd="' + e.id + '"]');
     if (el) el.textContent = left > 0 ? "⏳ متبقي على الحضور " + mmss(left) : "انتهت المهلة، جاري إلغاء الحجز";
@@ -67,7 +71,7 @@ function tick() {
 }
 
 function exportCsv() {
-  const rows = [["الاسم", "الجوال", "العدد", "وقت التسجيل", "الحالة"]].concat(items.map(e => [e.name, e.phone, e.count, fmt(e.createdAt), isDone(e) ? label(e) : "ينتظر"]));
+  const rows = [["الاسم", "الجوال", "العدد", "وقت التسجيل", "الحالة"]].concat(items.map(e => [e.name, e.phone, e.count, fmt(e.createdAt), (isDone(e) || isStale(e)) ? label(e) : "ينتظر"]));
   const csv = "\uFEFF" + rows.map(r => r.map(v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"').join(",")).join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -75,8 +79,9 @@ function exportCsv() {
 }
 
 function render() {
-  const waiting = items.filter(e => !isDone(e));
-  const done = items.filter(isDone).sort((a, b) => (b.doneAt ? b.doneAt.toMillis() : 0) - (a.doneAt ? a.doneAt.toMillis() : 0));
+  const waiting = items.filter(e => !isDone(e) && !isStale(e));
+  const stamp = x => x.doneAt ? x.doneAt.toMillis() : (x.createdAt ? x.createdAt.toMillis() : 0);
+  const done = items.filter(e => isDone(e) || isStale(e)).sort((a, b) => stamp(b) - stamp(a));
   const h = ['<div class="brand sm"><img class="logo" src="logo.png" alt="FŇH"></div><div class="row" style="justify-content:space-between"><h1>قائمة الانتظار (' + waiting.length + ')</h1><button class="b o" id="out" style="width:auto;margin:0;padding:8px 12px;font-size:14px">خروج</button></div>'];
   if (!waiting.length) h.push('<p class="s">لا يوجد زبائن في الانتظار الآن.</p>');
   waiting.forEach((e, i) => {
