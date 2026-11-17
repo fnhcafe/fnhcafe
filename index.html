@@ -24,30 +24,53 @@
 </div>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, doc, runTransaction, serverTimestamp, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, doc, runTransaction, writeBatch, serverTimestamp, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig, PLACE_NAME } from "./firebase-config.js";
 document.getElementById("ttl").textContent = PLACE_NAME;
 const db = getFirestore(initializeApp(firebaseConfig));
 const norm = p => { p = (p||"").replace(/[^\d]/g,"").replace(/^00/,""); if (/^05\d{8}$/.test(p)) p = "966"+p.slice(1); return p; };
 const $ = id => document.getElementById(id);
-const KEY = "fnh_ticket_v2";
+const KEY = "fnh_ticket_v3";
 const GRACE = 5 * 60 * 1000;
-// يوم العمل يبدأ الساعة 2 فجراً بتوقيت السعودية (UTC+3) وينتهي 2 فجراً اليوم التالي
+// يوم العمل ينتهي الساعة 2 فجراً بتوقيت السعودية (UTC+3)
 const dayOf = ms => new Date(ms + 3 * 3600e3 - 2 * 3600e3).toISOString().slice(0, 10).replace(/-/g, "");
+const rand = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
 let stopA = null, stopB = null, timer = null;
 
 function mmss(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
 function clearSaved() { try { localStorage.removeItem(KEY); } catch (e) {} }
 
-function track(day, n) {
-  try { localStorage.setItem(KEY, JSON.stringify({ day, n })); } catch (e) {}
+function track(day, n, secret) {
+  try { localStorage.setItem(KEY, JSON.stringify({ day, n, secret })); } catch (e) {}
   if (stopA) stopA(); if (stopB) stopB(); if (timer) clearInterval(timer);
-  let mine = null, waiting = [];
-  $("box").innerHTML = '<div class="ok"><div class="m">رقمك</div><div class="tnum">' + n + '</div><h2 id="st">جاري التحميل...</h2><p class="s" id="ps"></p><div id="act"></div></div>';
-  const draw = () => {
+  const id = day + "_" + n;
+  let mine = null, waiting = [], confirming = false, busy = false, lastKey = "";
+  $("box").innerHTML = '<div class="ok"><div class="m">رقمك</div><div class="tnum">' + n + '</div><h2 id="st">جاري التحميل...</h2><p class="s" id="ps"></p><div id="act"></div><div class="err" id="ce"></div></div>';
+
+  async function doCancel() {
+    busy = true; lastKey = ""; draw();
+    try {
+      const b = writeBatch(db);
+      b.set(doc(db, "cancels", id), { secret });
+      b.update(doc(db, "tickets", id), { status: "selfcancel" });
+      await b.commit();
+    } catch (e) {
+      console.error(e);
+      confirming = false; busy = false; lastKey = "";
+      const ce = $("ce"); if (ce) ce.textContent = "تعذّر إلغاء الحجز (" + (e && e.code ? e.code : "خطأ") + "). حاول مرة ثانية.";
+      draw();
+    }
+  }
+
+  function setAct(key, html, bind) {
+    if (key === lastKey) return;
+    lastKey = key; const act = $("act"); act.innerHTML = html; if (bind) bind();
+  }
+
+  function draw() {
     if (!mine) return;
-    const st = $("st"), ps = $("ps"), act = $("act"); if (!st) return;
-    act.innerHTML = "";
+    const st = $("st"), ps = $("ps"); if (!st) return;
+    const active = mine.status === "waiting" || mine.status === "called";
     if (mine.status === "waiting") {
       const ahead = waiting.filter(t => t < n).length;
       st.textContent = "ترتيبك في الانتظار: " + (ahead + 1);
@@ -58,14 +81,24 @@ function track(day, n) {
       ps.textContent = left > 0 ? "تفضّل خلال " + mmss(left) + " وإلا سيُلغى الحجز" : "انتهت المهلة";
     } else if (mine.status === "done") {
       st.textContent = "شكراً لزيارتك ☕"; ps.textContent = "نتمنى لك وقتاً طيباً في فنة";
-      act.innerHTML = '<button class="b o" id="again">حجز جديد</button>';
+    } else if (mine.status === "selfcancel") {
+      st.textContent = "تم إلغاء حجزك"; ps.textContent = "بناءً على طلبك. نتشرف بزيارتك في وقت آخر";
     } else {
       st.textContent = "أُلغي حجزك"; ps.textContent = "تم الإلغاء لعدم الحضور في الوقت المحدد";
-      act.innerHTML = '<button class="b o" id="again">حجز جديد</button>';
     }
-    const ag = $("again"); if (ag) ag.onclick = () => { clearSaved(); location.reload(); };
-  };
-  stopA = onSnapshot(doc(db, "tickets", day + "_" + n), s => {
+    if (active && secret) {
+      if (busy) setAct("busy", '<button class="b o" disabled>جاري الإلغاء...</button>');
+      else if (confirming) setAct("confirm",
+        '<p class="s" style="color:var(--dg);font-weight:700;margin:14px 0 0">هل أنت متأكد من إلغاء حجزك؟ لا يمكن التراجع.</p>' +
+        '<div class="a"><button class="b" id="yes" style="background:var(--dg);color:#fff">نعم، ألغِ الحجز</button><button class="b o" id="no">رجوع</button></div>',
+        () => { $("yes").onclick = doCancel; $("no").onclick = () => { confirming = false; lastKey = ""; draw(); }; });
+      else setAct("ask", '<button class="b o" id="cx" style="margin-top:18px">إلغاء الحجز</button>', () => { $("cx").onclick = () => { confirming = true; lastKey = ""; draw(); }; });
+    } else if (!active) {
+      setAct("again", '<button class="b o" id="again" style="margin-top:18px">حجز جديد</button>', () => { $("again").onclick = () => { clearSaved(); location.reload(); }; });
+    } else setAct("none", "");
+  }
+
+  stopA = onSnapshot(doc(db, "tickets", id), s => {
     if (!s.exists()) { clearSaved(); location.reload(); return; }
     mine = s.data(); draw();
   }, () => { const st = $("st"); if (st) st.textContent = "تعذّر تحديث الحالة، حدّث الصفحة"; });
@@ -79,18 +112,19 @@ $("go").onclick = async () => {
   if (phone.length < 9 || phone.length > 15) return $("er").textContent = "رقم الجوال غير صحيح";
   if (!count || count < 1 || count > 30) return $("er").textContent = "اكتب عدد الأشخاص (من 1 إلى 30)";
   $("er").textContent = ""; $("go").disabled = true;
-  const day = dayOf(Date.now());
+  const day = dayOf(Date.now()), secret = rand();
   try {
     const n = await runTransaction(db, async tx => {
       const cref = doc(db, "counters", day);
       const snap = await tx.get(cref);
       const next = (snap.exists() ? snap.data().n : 0) + 1;
+      const id = day + "_" + next;
       tx.set(cref, { n: next });
-      tx.set(doc(collection(db, "waitlist")), { name: name.slice(0,60), phone, count, createdAt: serverTimestamp(), ticket: next, day });
-      tx.set(doc(db, "tickets", day + "_" + next), { ticket: next, day, status: "waiting", createdAt: serverTimestamp() });
+      tx.set(doc(db, "waitlist", id), { name: name.slice(0,60), phone, count, createdAt: serverTimestamp(), ticket: next, day, secret });
+      tx.set(doc(db, "tickets", id), { ticket: next, day, status: "waiting", createdAt: serverTimestamp() });
       return next;
     });
-    track(day, n);
+    track(day, n, secret);
   } catch (e) {
     console.error(e);
     $("er").textContent = "تعذّر التسجيل (" + (e && e.code ? e.code : "خطأ") + "). تأكد من الاتصال وحاول مرة ثانية.";
@@ -100,7 +134,7 @@ $("go").onclick = async () => {
 
 try {
   const saved = JSON.parse(localStorage.getItem(KEY) || "null");
-  if (saved && saved.day === dayOf(Date.now())) track(saved.day, saved.n); else if (saved) clearSaved();
+  if (saved && saved.day === dayOf(Date.now())) track(saved.day, saved.n, saved.secret); else if (saved) clearSaved();
 } catch (e) {}
 </script>
 </body>

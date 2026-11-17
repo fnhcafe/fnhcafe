@@ -16,15 +16,16 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, query, orderBy, onSnapshot, writeBatch, serverTimestamp, doc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, query, orderBy, onSnapshot, where, writeBatch, serverTimestamp, doc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 const app = initializeApp(firebaseConfig), auth = getAuth(app), db = getFirestore(app);
 const root = document.getElementById("app");
 const esc = s => { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; };
-let unsub = null, first = true, items = [];
+let unsub = null, unsub2 = null, first = true, items = [], tmap = {};
 
 function loginView() {
   if (unsub) { unsub(); unsub = null; }
+  if (unsub2) { unsub2(); unsub2 = null; }
   root.innerHTML = '<div class="brand sm"><img class="logo" src="logo.png" alt="FŇH"></div><h1>دخول صاحب المحل</h1><div class="c"><label for="em">البريد الإلكتروني</label><input id="em" type="email" autocomplete="username">' +
     '<label for="pw">الرقم السري</label><input id="pw" type="password" autocomplete="current-password"><div class="err" id="er"></div>' +
     '<button class="b" id="in">دخول</button></div>';
@@ -39,9 +40,10 @@ const GRACE = 5 * 60 * 1000;
 // يوم العمل ينتهي 2 فجراً بتوقيت السعودية
 const dayOf = ms => new Date(ms + 3 * 3600e3 - 2 * 3600e3).toISOString().slice(0, 10).replace(/-/g, "");
 const eDay = e => e.createdAt ? dayOf(e.createdAt.toMillis()) : dayOf(Date.now());
-const isDone = e => e.status === "done" || e.status === "cancelled";
+const selfCx = e => !!(e.day && tmap[e.day + "_" + e.ticket]);
+const isDone = e => e.status === "done" || e.status === "cancelled" || selfCx(e);
 const isStale = e => !isDone(e) && eDay(e) !== dayOf(Date.now());
-const label = e => e.status === "cancelled" ? "ملغي (تأخر)" : e.status === "done" ? "تمت خدمته" : "لم تتم خدمته (يوم سابق)";
+const label = e => e.status === "done" ? "تمت خدمته" : (e.cancelledBy === "customer" || selfCx(e)) ? "ألغاه الزبون" : e.status === "cancelled" ? "ملغي (تأخر)" : "لم تتم خدمته (يوم سابق)";
 const cancelling = new Set();
 let warned = false;
 function save(id, data, tdata) {
@@ -58,6 +60,14 @@ function save(id, data, tdata) {
 function cancelBooking(id) {
   if (cancelling.has(id)) return; cancelling.add(id);
   return save(id, { status: "cancelled", doneAt: serverTimestamp() }, { status: "cancelled" }).catch(() => setTimeout(() => cancelling.delete(id), 20000));
+}
+const syncing = new Set();
+function syncSelf() {
+  items.forEach(e => {
+    if (e.status === "done" || e.status === "cancelled" || !selfCx(e) || syncing.has(e.id)) return;
+    syncing.add(e.id);
+    save(e.id, { status: "cancelled", doneAt: serverTimestamp(), cancelledBy: "customer" }, null).catch(() => setTimeout(() => syncing.delete(e.id), 20000));
+  });
 }
 function mmss(ms) { const s = Math.max(0, Math.ceil(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
 function tick() {
@@ -126,10 +136,15 @@ function beep() {
 
 onAuthStateChanged(auth, user => {
   if (!user) return loginView();
+  unsub2 = onSnapshot(query(collection(db, "tickets"), where("status", "==", "selfcancel")), snap => {
+    tmap = {}; snap.docs.forEach(d => { tmap[d.id] = true; });
+    syncSelf(); render();
+  }, () => {});
   unsub = onSnapshot(query(collection(db, "waitlist"), orderBy("createdAt")), snap => {
     if (!first && snap.docChanges().some(c => c.type === "added" && !c.doc.metadata.hasPendingWrites)) beep();
     first = false;
     items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    syncSelf();
     render();
   }, () => { root.innerHTML = '<p class="err">لا يمكن قراءة القائمة. تأكد أن قواعد Firestore منشورة.</p>'; });
 });
